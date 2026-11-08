@@ -2,6 +2,9 @@
 const express = require("express");
 const router = express.Router();
 const Tenant = require("../models/Tenant");
+const Message = require("../models/Message");
+const AutoReply = require("../models/AutoReply");
+const { sendInstagramMessage } = require("../utils/instagram");
 
 // 1. Meta'nın qapını döyməsi və bizim serveri təsdiqləməsi (GET)
 router.get("/", (req, res) => {
@@ -48,15 +51,66 @@ router.post("/", async (req, res) => {
         const recipientId = webhookEvent.recipient?.id;
         const messageText = webhookEvent.message?.text;
 
-        if (!recipientId || !messageText) continue;
+        if (!senderId || !recipientId || !messageText) continue;
 
         const tenant = await Tenant.findOne({ instagramId: recipientId });
 
         if (tenant) {
+          const message = new Message({
+            tenantId: tenant._id,
+            senderId,
+            text: messageText,
+            direction: "inbound",
+          });
+          await message.save();
+
+          console.log("Message saved to the database.", {
+            tenantId: tenant._id,
+            senderId,
+          });
+
           console.log(`Message received for store: ${tenant.storeName}`, {
             senderId,
             messageText,
           });
+
+          const normalizedMessageText = messageText.toLowerCase();
+          const rules = await AutoReply.find({
+            tenantId: tenant._id,
+            isActive: true,
+          });
+
+          let replySent = false;
+
+          for (const rule of rules) {
+            if (normalizedMessageText.includes(rule.keyword.toLowerCase())) {
+              await sendInstagramMessage(
+                tenant.instagramId,
+                senderId,
+                rule.replyText,
+                tenant.accessToken,
+              );
+
+              const outboundMessage = new Message({
+                tenantId: tenant._id,
+                senderId,
+                text: rule.replyText,
+                direction: "outbound",
+              });
+              await outboundMessage.save();
+
+              console.log("Outbound message saved to the database.", {
+                tenantId: tenant._id,
+                senderId,
+              });
+              replySent = true;
+              break;
+            }
+          }
+
+          if (!replySent) {
+            console.log("No keyword matched. Operator will handle.");
+          }
         } else {
           console.log(`Tenant not found for ID: ${recipientId}`);
         }
@@ -68,4 +122,3 @@ router.post("/", async (req, res) => {
 });
 
 module.exports = router;
-
